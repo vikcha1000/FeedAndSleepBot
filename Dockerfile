@@ -2,9 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+# Копируем requirements.txt первым для кэширования
+COPY ./requirements.txt /app/requirements.txt
+
+# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Копируем остальные файлы
+COPY . /app
 
 CMD ["python", "bot.py"]
