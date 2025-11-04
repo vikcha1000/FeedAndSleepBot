@@ -6,6 +6,8 @@ WORKDIR /app
 COPY . .
 #COPY requirements.txt /app/requirements.txt
 
+RUN pwd && ls -la
+
 # Устанавливаем зависимости
 RUN pip install --upgrade pip \
 && pip install --no-cache-dir -r /app/requirements.txt
