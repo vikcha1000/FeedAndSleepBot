@@ -1,5 +1,5 @@
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 
@@ -23,6 +23,11 @@ def save_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def get_moscow_time():
+    """Получить московское время (фиксированное смещение +3)"""
+    moscow_tz = timezone(timedelta(hours=3))
+    moscow_time = datetime.now(moscow_tz)
+    return moscow_time.strftime("%H:%M"), moscow_time
 
 def create_main_keyboard():
     """Основная клавиатура с кнопками"""
@@ -201,7 +206,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     text = update.message.text
     user_id = str(update.effective_user.id)
-    current_time = datetime.now().strftime("%H:%M")
+    # ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+    current_time, current_datetime = get_moscow_time()
 
     # Загружаем данные
     data = load_data()
@@ -388,6 +394,9 @@ def update_last_record(user_id, new_time=None, new_volume=None):
     if new_time:
         # Обновляем время
         record['time'] = new_time
+        # Обновляем timestamp с московским временем
+        # Получаем текущую дату с московским временем
+        _, current_moscow_datetime = get_moscow_time()
         # Обновляем timestamp
         old_timestamp = datetime.fromisoformat(record['timestamp'])
         hours, minutes = map(int, new_time.split(':'))
