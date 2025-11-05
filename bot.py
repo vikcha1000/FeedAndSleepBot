@@ -75,17 +75,21 @@ def get_russian_date(date):
 
 
 def calculate_daily_totals(records):
-    """Вычисляем итоги по дням"""
+    """Вычисляем итоги по дням с расчетом продолжительности каждого сна"""
     daily_data = {}
 
-    for record in records:
+    # Сначала сортируем все записи по времени (от старых к новым)
+    sorted_records = sorted(records, key=lambda x: x['timestamp'])
+
+    for record in sorted_records:
         record_date = datetime.fromisoformat(record['timestamp']).date()
 
         if record_date not in daily_data:
             daily_data[record_date] = {
                 'feeding_volume': 0,
                 'feeding_count': 0,
-                'all_records': []  # Все записи дня (и кормления, и сон)
+                'sleep_durations': [],  # Продолжительности каждого сна в минутах
+                'all_records': []  # Все записи дня с дополнительной информацией
             }
 
         if record['type'] == 'кормление':
@@ -98,14 +102,75 @@ def calculate_daily_totals(records):
             except ValueError:
                 pass
 
-        # Добавляем запись в общий список (с временной меткой для сортировки)
-        record_with_time = {
-            **record,
-            'time_obj': datetime.fromisoformat(record['timestamp']).time()
-        }
-        daily_data[record_date]['all_records'].append(record_with_time)
+            # Добавляем запись без информации о сне
+            daily_data[record_date]['all_records'].append({
+                **record,
+                'time_obj': datetime.fromisoformat(record['timestamp']).time(),
+                'sleep_duration': None
+            })
+
+        elif record['type'] == 'сон':
+            if record['action'] == 'заснул':
+                # Добавляем запись "заснул" без продолжительности
+                daily_data[record_date]['all_records'].append({
+                    **record,
+                    'time_obj': datetime.fromisoformat(record['timestamp']).time(),
+                    'sleep_duration': None
+                })
+
+            elif record['action'] == 'проснулся':
+                # Ищем ближайшее предыдущее "заснул" во ВСЕХ записях
+                sleep_duration = None
+
+                # Проходим по всем предыдущим записям в обратном порядке
+                for prev_record in reversed(sorted_records[:sorted_records.index(record)]):
+                    if prev_record['type'] == 'сон' and prev_record['action'] == 'заснул':
+                        # Нашли "заснул" - вычисляем продолжительность
+                        sleep_start = datetime.fromisoformat(prev_record['timestamp'])
+                        sleep_end = datetime.fromisoformat(record['timestamp'])
+                        sleep_duration = (sleep_end - sleep_start).total_seconds() / 60
+
+                        # Обновляем запись "заснул" с продолжительностью
+                        prev_date = datetime.fromisoformat(prev_record['timestamp']).date()
+                        if prev_date in daily_data:
+                            for rec in daily_data[prev_date]['all_records']:
+                                if (rec['type'] == 'сон' and
+                                        rec['action'] == 'заснул' and
+                                        rec['timestamp'] == prev_record['timestamp']):
+                                    rec['sleep_duration'] = sleep_duration
+                                    break
+
+                        # Добавляем продолжительность в общий список дня начала сна
+                        daily_data[prev_date]['sleep_durations'].append(sleep_duration)
+                        break
+
+                # Добавляем запись "проснулся" с продолжительностью
+                daily_data[record_date]['all_records'].append({
+                    **record,
+                    'time_obj': datetime.fromisoformat(record['timestamp']).time(),
+                    'sleep_duration': sleep_duration
+                })
 
     return daily_data
+
+
+def format_sleep_duration(minutes):
+    """Форматируем продолжительность сна в читаемый вид"""
+    if minutes is None or minutes <= 0:
+        return "?"
+
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+
+    if hours == 0:
+        return f"{mins} мин"
+    elif mins == 0:
+        return f"{hours} час" + ("а" if 2 <= hours % 10 <= 4 and (hours % 100 < 10 or hours % 100 >= 20) else "ов")
+    else:
+        hours_text = f"{hours} час" + (
+            "а" if 2 <= hours % 10 <= 4 and (hours % 100 < 10 or hours % 100 >= 20) else "ов")
+        mins_text = f"{mins} мин"
+        return f"{hours_text} {mins_text}"
 
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, show_all=False):
@@ -120,9 +185,6 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, show_
             reply_markup=create_main_keyboard()
         )
         return
-
-    # Сортируем записи по времени (новые сверху)
-    user_records.sort(key=lambda x: x['timestamp'], reverse=True)
 
     # Вычисляем итоги по дням
     daily_totals = calculate_daily_totals(user_records)
@@ -140,23 +202,46 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, show_
         daily_data = daily_totals[date]
         date_label = get_russian_date(date)
 
-        # Заголовок дня с итогом и количеством кормлений
-        feeding_info = ""
-        if daily_data['feeding_count'] > 0:
-            feeding_info = f" - 🍼 {daily_data['feeding_volume']} мл ({daily_data['feeding_count']} кормлений)"
+        # Рассчитываем общую статистику по дню
+        total_sleep_minutes = sum(daily_data['sleep_durations'])
+        sleep_count = len(daily_data['sleep_durations'])
 
-        history_text += f"**{date_label}**{feeding_info}\n\n"
+        # Формируем информацию о кормлениях и сне
+        feeding_info = ""
+        sleep_info = ""
+
+        if daily_data['feeding_count'] > 0:
+            feeding_info = f"🍼 {daily_data['feeding_volume']} мл ({daily_data['feeding_count']} кормлений)"
+
+        if sleep_count > 0:
+            sleep_duration_text = format_sleep_duration(total_sleep_minutes)
+            sleep_info = f"😴 {sleep_count} снов ({sleep_duration_text})"
+
+        # Объединяем информацию
+        stats_parts = []
+        if feeding_info:
+            stats_parts.append(feeding_info)
+        if sleep_info:
+            stats_parts.append(sleep_info)
+
+        stats_text = " - " + ", ".join(stats_parts) if stats_parts else ""
+
+        history_text += f"**{date_label}**{stats_text}\n\n"
 
         # Сортируем все записи дня от новых к старым (в обратном порядке времени)
         daily_data['all_records'].sort(key=lambda x: x['time_obj'], reverse=True)
 
-        # Выводим все записи дня в смешанном порядке
+        # Выводим все записи дня
         for record in daily_data['all_records']:
             if record['type'] == 'кормление':
                 history_text += f"   🍼 {record['volume']} в {record['time']}\n"
             elif record['type'] == 'сон':
                 emoji = "😴" if record['action'] == 'заснул' else "🌅"
-                history_text += f"   {emoji} {record['action'].capitalize()} в {record['time']}\n"
+                if record['action'] == 'проснулся' and record['sleep_duration'] is not None:
+                    duration_text = format_sleep_duration(record['sleep_duration'])
+                    history_text += f"   {emoji} {record['action'].capitalize()} в {record['time']} ({duration_text})\n"
+                else:
+                    history_text += f"   {emoji} {record['action'].capitalize()} в {record['time']}\n"
 
         history_text += "\n\n"
 
@@ -165,7 +250,11 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, show_
         hidden_days = len(sorted_dates) - 3
         hidden_volume = sum(daily_totals[date]['feeding_volume'] for date in sorted_dates[3:])
         hidden_count = sum(daily_totals[date]['feeding_count'] for date in sorted_dates[3:])
-        history_text += f"... и еще {hidden_days} дней ({hidden_volume} мл, {hidden_count} кормлений)\n\n"
+        hidden_sleep_count = sum(len(daily_totals[date]['sleep_durations']) for date in sorted_dates[3:])
+        hidden_sleep_duration = sum(sum(daily_totals[date]['sleep_durations']) for date in sorted_dates[3:])
+
+        hidden_sleep_text = format_sleep_duration(hidden_sleep_duration)
+        history_text += f"... и еще {hidden_days} дней ({hidden_volume} мл, {hidden_count} кормлений, {hidden_sleep_count} снов ({hidden_sleep_text}))\n\n"
 
     # Создаем инлайн-кнопки
     keyboard = []
@@ -190,6 +279,8 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, show_
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+
+
 
 async def handle_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на инлайн-кнопки истории"""
@@ -445,64 +536,80 @@ async def edit_last_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
+
 async def handle_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик нажатий на кнопки редактирования"""
-        query = update.callback_query
-        user_id = query.from_user.id
-        await query.answer()
+    """Обработчик нажатий на кнопки редактирования"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
 
-        if query.data == "edit_volume":
-            context.user_data['editing_volume'] = True
-            await query.edit_message_text(
-                "✏️ Введите новый объем в мл:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Отмена", callback_data="cancel_edit")]])
-            )
+    if query.data == "edit_volume":
+        context.user_data['editing_volume'] = True
+        await query.edit_message_text(
+            "✏️ Введите новый объем в мл:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Отмена", callback_data="cancel_edit")]])
+        )
 
-        elif query.data == "edit_time":
-            context.user_data['editing_time'] = True
-            await query.edit_message_text(
-                "🕐 Введите новое время (формат ЧЧ:ММ, например 14:30):",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Отмена", callback_data="cancel_edit")]])
-            )
+    elif query.data == "edit_time":
+        context.user_data['editing_time'] = True
+        await query.edit_message_text(
+            "🕐 Введите новое время (формат ЧЧ:ММ, например 14:30):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Отмена", callback_data="cancel_edit")]])
+        )
 
-        elif query.data == "delete_record":
-            # Подтверждение удаления
-            keyboard = [
-                [InlineKeyboardButton("✅ Да, удалить", callback_data="confirm_delete")],
-                [InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_edit")]
-            ]
-            await query.edit_message_text(
-                "❓ Вы уверены, что хотите удалить последнюю запись?",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+    elif query.data == "delete_record":
+        # Подтверждение удаления
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, удалить", callback_data="confirm_delete")],
+            [InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_edit")]
+        ]
+        await query.edit_message_text(
+            "❓ Вы уверены, что хотите удалить последнюю запись?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
-        elif query.data == "confirm_delete":
-            deleted_record = delete_last_record(user_id)
-            if deleted_record:
-                if deleted_record['type'] == 'кормление':
-                    record_text = f"🍼 Кормление: {deleted_record['volume']} в {deleted_record['time']}"
-                else:
-                    emoji = "😴" if deleted_record['action'] == 'заснул' else "🌅"
-                    record_text = f"{emoji} {deleted_record['action'].capitalize()} в {deleted_record['time']}"
-
-                await query.edit_message_text(
-                    f"✅ Запись удалена:\n{record_text}",
-                    reply_markup=create_main_keyboard()
-                )
+    elif query.data == "confirm_delete":
+        deleted_record = delete_last_record(user_id)
+        if deleted_record:
+            if deleted_record['type'] == 'кормление':
+                record_text = f"🍼 Кормление: {deleted_record['volume']} в {deleted_record['time']}"
             else:
-                await query.edit_message_text(
-                    "❌ Ошибка при удалении записи",
-                    reply_markup=create_main_keyboard()
-                )
+                emoji = "😴" if deleted_record['action'] == 'заснул' else "🌅"
+                record_text = f"{emoji} {deleted_record['action'].capitalize()} в {deleted_record['time']}"
 
-        elif query.data == "cancel_edit":
+            # Сразу возвращаем в главное меню с сообщением об удалении
             await query.edit_message_text(
-                "✏️ Редактирование отменено",
+                f"✅ Запись удалена:\n{record_text}",
+                reply_markup=None
+            )
+
+            # Отправляем новое сообщение с главным меню
+            await query.message.reply_text(
+                "Выберите действие:",
                 reply_markup=create_main_keyboard()
             )
-            # Очищаем состояние редактирования
-            context.user_data.pop('editing_volume', None)
-            context.user_data.pop('editing_time', None)
+        else:
+            await query.edit_message_text(
+                "❌ Ошибка при удалении записи или записей больше нет",
+                reply_markup=create_main_keyboard()
+            )
+
+    elif query.data == "cancel_edit":
+        # Полностью закрываем меню редактирования
+        await query.edit_message_text(
+            "✏️ Редактирование отменено",
+            reply_markup=None
+        )
+
+        # Возвращаем в главное меню
+        await query.message.reply_text(
+            "Выберите действие:",
+            reply_markup=create_main_keyboard()
+        )
+
+        # Очищаем состояние редактирования
+        context.user_data.pop('editing_volume', None)
+        context.user_data.pop('editing_time', None)
 
 
 async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
