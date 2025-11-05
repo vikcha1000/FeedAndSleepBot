@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import config
 
 # Файл для хранения данных
-DATA_FILE = 'feeding_data.json'
+DATA_FILE = 'data/feeding_data.json'
 
 def load_data():
     """Загрузка данных из файла"""
@@ -54,6 +54,100 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+
+def get_today_summary(user_id):
+    """Получить сводку за сегодня"""
+    data = load_data()
+    user_records = data.get(str(user_id), [])
+
+    if not user_records:
+        return None
+
+    # Получаем сегодняшнюю дату
+    today = datetime.now().date()
+
+    # Фильтруем записи за сегодня
+    today_records = [
+        record for record in user_records
+        if datetime.fromisoformat(record['timestamp']).date() == today
+    ]
+
+    if not today_records:
+        return None
+
+    # Вычисляем статистику по кормлениям
+    feeding_volume = 0
+    feeding_count = 0
+
+    # Вычисляем статистику по снам
+    sleep_durations = []
+    open_sleeps = []  # Список для отслеживания незакрытых снов
+
+    # Сортируем записи по времени (от старых к новым)
+    sorted_records = sorted(today_records, key=lambda x: x['timestamp'])
+
+    for record in sorted_records:
+        if record['type'] == 'кормление':
+            # Извлекаем объем из строки "120 мл"
+            volume_str = record['volume'].replace(' мл', '').strip()
+            try:
+                volume = int(volume_str)
+                feeding_volume += volume
+                feeding_count += 1
+            except ValueError:
+                pass
+
+        elif record['type'] == 'сон':
+            if record['action'] == 'заснул':
+                # Добавляем начало сна в список
+                open_sleeps.append({
+                    'timestamp': record['timestamp'],
+                    'time': record['time']
+                })
+            elif record['action'] == 'проснулся' and open_sleeps:
+                # Берем последний незакрытый сон
+                last_sleep = open_sleeps.pop()
+                sleep_start = datetime.fromisoformat(last_sleep['timestamp'])
+                sleep_end = datetime.fromisoformat(record['timestamp'])
+                sleep_duration = (sleep_end - sleep_start).total_seconds() / 60
+                sleep_durations.append(sleep_duration)
+
+    # Форматируем результат
+    feeding_info = f"🍼 {feeding_volume} мл ({feeding_count} кормлений)"
+
+    sleep_count = len(sleep_durations)
+    total_sleep_minutes = sum(sleep_durations)
+
+    if sleep_count > 0:
+        sleep_duration_text = format_sleep_duration(total_sleep_minutes)
+        sleep_info = f"😴 {sleep_count} снов ({sleep_duration_text})"
+        return f"{feeding_info}, {sleep_info}"
+    else:
+        return feeding_info
+
+
+async def send_today_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить сводку за сегодня"""
+    user_id = update.effective_user.id
+    summary = get_today_summary(user_id)
+
+    if summary:
+        message = f"**Сегодня** - {summary}"
+    else:
+        message = "📝 Сегодня еще нет записей"
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=create_main_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=create_main_keyboard()
+        )
 
 def get_russian_date(date):
     """Конвертируем дату в русский формат"""
@@ -308,10 +402,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ПРОВЕРЯЕМ СОСТОЯНИЯ РЕДАКТИРОВАНИЯ ПЕРВЫМИ
     if context.user_data.get('editing_volume'):
         await handle_edit_input(update, context)
+        await send_today_summary(update, context)  # ДОБАВЛЕНО
         return
 
     elif context.user_data.get('editing_time'):
         await handle_edit_input(update, context)
+        await send_today_summary(update, context)  # ДОБАВЛЕНО
         return
 
     elif text in ["120", "90", "60", "150"]:
@@ -329,6 +425,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Записано кормление: {text} мл в {current_time}",
             reply_markup=create_main_keyboard()
         )
+        await send_today_summary(update, context)  # ДОБАВЛЕНО
 
     elif text == "Ввести объем вручную":
         context.user_data['waiting_for_volume'] = True
@@ -352,6 +449,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"😴 Записан сон: заснул в {current_time}",
             reply_markup=create_main_keyboard()
         )
+        await send_today_summary(update, context)  # ДОБАВЛЕНО
 
     elif text == "Проснулся":
         # Сохраняем время пробуждения
@@ -368,6 +466,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🌅 Записан сон: проснулся в {current_time}",
             reply_markup=create_main_keyboard()
         )
+        await send_today_summary(update, context)  # ДОБАВЛЕНО
 
     elif text == "История":
         await show_history(update, context)
@@ -404,6 +503,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Записан объем: {volume} мл в {current_time}",
                     reply_markup=create_main_keyboard()
                 )
+                await send_today_summary(update, context)  # ДОБАВЛЕНО
             else:
                 await update.message.reply_text("❌ Объем должен быть положительным числом")
         except ValueError:
@@ -583,11 +683,8 @@ async def handle_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=None
             )
 
-            # Отправляем новое сообщение с главным меню
-            await query.message.reply_text(
-                "Выберите действие:",
-                reply_markup=create_main_keyboard()
-            )
+            # Отправляем сводку за сегодня
+            await send_today_summary(update, context)  # ДОБАВЛЕНО
         else:
             await query.edit_message_text(
                 "❌ Ошибка при удалении записи или записей больше нет",
