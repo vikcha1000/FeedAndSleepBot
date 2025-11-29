@@ -6,6 +6,8 @@ WORKDIR /app
 COPY . .
 #COPY requirements.txt /app/requirements.txt
 
+EXPOSE 5000
+
 RUN pwd && ls -la
 
 # Устанавливаем зависимости

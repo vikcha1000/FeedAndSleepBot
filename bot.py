@@ -2,26 +2,49 @@
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 import config
 
-# Файл для хранения данных
-DATA_FILE = 'data/feeding_data.json'
+
+
+import os
+
+# Файл для хранения данных в Volume
+DATA_FILE = Path(__file__).parent / 'data' / 'feeding_data.json'
+
 
 def load_data():
     """Загрузка данных из файла"""
-    if os.path.exists(DATA_FILE):
+    # Создаем файл если не существует
+    if not os.path.exists(DATA_FILE):
+        base_data = {'users': {}}
+        save_data(base_data)
+        return base_data
+
+    try:
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {}
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        # Если ошибка, создаем новый файл
+        base_data = {'users': {}}
+        save_data(base_data)
+        return base_data
+
 
 def save_data(data):
     """Сохранение данных в файл"""
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving data: {e}")
+        return False
 
 def get_moscow_time():
     """Получить московское время (фиксированное смещение +3)"""
@@ -777,7 +800,6 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Очищаем состояние независимо от результата
         context.user_data.pop('editing_time', None)
-
 
 def main():
     """Основная функция"""
