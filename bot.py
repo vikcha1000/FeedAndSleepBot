@@ -35,8 +35,6 @@ def load_data():
         save_data(base_data)
         return base_data
 
-
-
 def save_data(data):
     """Сохранение данных в файл"""
     try:
